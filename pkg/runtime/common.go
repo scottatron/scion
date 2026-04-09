@@ -638,6 +638,18 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 // The containerHome parameter is the container user's home directory (e.g., /home/gemini)
 // and is used to expand ~/ prefixes in target paths.
 func writeFileSecrets(homeDir string, containerHome string, secrets []api.ResolvedSecret) ([]string, error) {
+	return writeFileSecretsMode(homeDir, containerHome, secrets, false)
+}
+
+// writeFileSecretsWithHomeCopy mirrors writeFileSecrets but copies secrets
+// targeting paths under the mounted container home directly into homeDir.
+// This avoids nested file bind mounts like /home/scion/.codex/auth.json when
+// /home/scion is already mounted as a directory, which Docker on macOS rejects.
+func writeFileSecretsWithHomeCopy(homeDir string, containerHome string, secrets []api.ResolvedSecret) ([]string, error) {
+	return writeFileSecretsMode(homeDir, containerHome, secrets, true)
+}
+
+func writeFileSecretsMode(homeDir string, containerHome string, secrets []api.ResolvedSecret, copyIntoHome bool) ([]string, error) {
 	secretsDir := filepath.Join(filepath.Dir(homeDir), "secrets")
 
 	// Deduplicate by container target path (defense-in-depth — the secret
@@ -681,6 +693,23 @@ func writeFileSecrets(homeDir string, containerHome string, secrets []api.Resolv
 			data = []byte(s.Value)
 		}
 
+		if homeDir != "" && strings.HasPrefix(containerTarget, containerHome+"/") {
+			rel := strings.TrimPrefix(containerTarget, containerHome+"/")
+			parentDir := filepath.Dir(rel)
+			if parentDir != "." {
+				if err := os.MkdirAll(filepath.Join(homeDir, parentDir), 0755); err != nil {
+					return nil, fmt.Errorf("failed to create secret parent directory %s: %w", parentDir, err)
+				}
+			}
+			if copyIntoHome {
+				dst := filepath.Join(homeDir, rel)
+				if err := os.WriteFile(dst, data, 0600); err != nil {
+					return nil, fmt.Errorf("failed to copy secret file %s into home: %w", s.Name, err)
+				}
+				continue
+			}
+		}
+
 		// Write to staging dir using the secret name as filename
 		hostPath := filepath.Join(secretsDir, s.Name)
 		if err := os.MkdirAll(filepath.Dir(hostPath), 0700); err != nil {
@@ -688,18 +717,6 @@ func writeFileSecrets(homeDir string, containerHome string, secrets []api.Resolv
 		}
 		if err := os.WriteFile(hostPath, data, 0600); err != nil {
 			return nil, fmt.Errorf("failed to write secret file %s: %w", s.Name, err)
-		}
-
-		// Pre-create the parent directory of the mount target inside the
-		// agent home so that Docker/Podman does not create it as root
-		// (which would make the agent directory undeletable by a non-root
-		// broker process).
-		if homeDir != "" && strings.HasPrefix(containerTarget, containerHome+"/") {
-			rel := strings.TrimPrefix(containerTarget, containerHome+"/")
-			parentDir := filepath.Dir(rel)
-			if parentDir != "." {
-				_ = os.MkdirAll(filepath.Join(homeDir, parentDir), 0755)
-			}
 		}
 
 		// Bind-mount from host staging path to container target path (read-only)
