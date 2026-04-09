@@ -212,6 +212,61 @@ func TestWriteFileSecrets_PreCreatesParentDirs(t *testing.T) {
 	}
 }
 
+func TestWriteFileSecretsWithHomeCopy_CopiesHomeTargets(t *testing.T) {
+	homeDir := t.TempDir()
+
+	secrets := []api.ResolvedSecret{
+		{
+			Name:   "CODEX_AUTH",
+			Type:   "file",
+			Target: "~/.codex/auth.json",
+			Value:  base64.StdEncoding.EncodeToString([]byte(`{"auth_mode":"oauth"}`)),
+			Source: "user",
+		},
+		{
+			Name:   "TLS_CERT",
+			Type:   "file",
+			Target: "/etc/ssl/cert.pem",
+			Value:  base64.StdEncoding.EncodeToString([]byte("cert-content")),
+			Source: "grove",
+		},
+	}
+
+	mountSpecs, err := writeFileSecretsWithHomeCopy(homeDir, "/home/scion", secrets)
+	if err != nil {
+		t.Fatalf("writeFileSecretsWithHomeCopy failed: %v", err)
+	}
+
+	if len(mountSpecs) != 1 {
+		t.Fatalf("expected 1 mount spec for non-home target, got %d: %v", len(mountSpecs), mountSpecs)
+	}
+	expectedMount := filepath.Join(filepath.Dir(homeDir), "secrets", "TLS_CERT") + ":/etc/ssl/cert.pem:ro"
+	if mountSpecs[0] != expectedMount {
+		t.Fatalf("expected mount spec %q, got %q", expectedMount, mountSpecs[0])
+	}
+
+	authPath := filepath.Join(homeDir, ".codex", "auth.json")
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("expected copied auth file at %s: %v", authPath, err)
+	}
+	if string(data) != `{"auth_mode":"oauth"}` {
+		t.Fatalf("unexpected auth file content: %q", string(data))
+	}
+
+	info, err := os.Stat(authPath)
+	if err != nil {
+		t.Fatalf("failed to stat copied auth file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("expected copied auth file mode 0600, got %o", info.Mode().Perm())
+	}
+
+	if _, err := os.Stat(filepath.Join(filepath.Dir(homeDir), "secrets", "CODEX_AUTH")); !os.IsNotExist(err) {
+		t.Fatalf("expected home-targeted secret to avoid staging file, got err=%v", err)
+	}
+}
+
 func TestExpandTildeTarget(t *testing.T) {
 	tests := []struct {
 		target        string
