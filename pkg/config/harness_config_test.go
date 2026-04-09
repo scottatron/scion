@@ -453,3 +453,18 @@ func TestMapEmbedFileToHarnessConfigPath_RootSupportFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestSeedHarnessConfig_CodexHooksJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "codex")
+
+	err := SeedHarnessConfig(targetDir, &harness.Codex{}, false)
+	if err != nil {
+		t.Fatalf("SeedHarnessConfig failed: %v", err)
+	}
+
+	hooksPath := filepath.Join(targetDir, "home", ".codex", "hooks.json")
+	if _, err := os.Stat(hooksPath); err != nil {
+		t.Fatalf("expected hooks.json to be seeded at %s: %v", hooksPath, err)
+	}
+}

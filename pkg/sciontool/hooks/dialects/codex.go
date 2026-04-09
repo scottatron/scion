@@ -4,7 +4,11 @@ Copyright 2025 The Scion Authors.
 
 package dialects
 
-import "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+import (
+	"encoding/json"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+)
 
 // CodexDialect parses Codex notify payloads.
 type CodexDialect struct{}
@@ -31,23 +35,35 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 		RawName: rawName,
 		Dialect: "codex",
 		Data: hooks.EventData{
-			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message")),
+			Prompt:    getString(data, "prompt"),
+			Message:   firstNonEmptyString(getString(data, "title"), getString(data, "message"), getString(data, "last_assistant_message")),
+			Reason:    firstNonEmptyString(getString(data, "stopReason"), getString(data, "reason")),
+			Source:    getString(data, "source"),
 			ToolName:  getString(data, "tool_name"),
 			SessionID: getString(data, "session_id"),
 			Raw:       data,
 		},
 	}
 
-	// Extract tool input/output if available
+	// Extract tool input/output if available.
 	if val, ok := data["tool_input"]; ok {
 		if str, ok := val.(string); ok {
 			event.Data.ToolInput = str
+		} else if m, ok := val.(map[string]interface{}); ok {
+			event.Data.ToolInput = firstNonEmptyString(getString(m, "command"), jsonString(val))
 		}
 	}
-	if val, ok := data["tool_output"]; ok {
+	for _, key := range []string{"tool_output", "tool_response"} {
+		val, ok := data[key]
+		if !ok {
+			continue
+		}
 		if str, ok := val.(string); ok {
 			event.Data.ToolOutput = str
+			break
 		}
+		event.Data.ToolOutput = jsonString(val)
+		break
 	}
 
 	// Extract status fields
@@ -81,6 +97,14 @@ func (d *CodexDialect) normalizeEventName(name string) string {
 		return hooks.EventSessionStart
 	case "session-end", "SessionEnd":
 		return hooks.EventSessionEnd
+	case "UserPromptSubmit":
+		return hooks.EventPromptSubmit
+	case "Stop":
+		return hooks.EventResponseComplete
+	case "PreToolUse":
+		return hooks.EventToolStart
+	case "PostToolUse":
+		return hooks.EventToolEnd
 	case "tool-start", "BeforeTool":
 		return hooks.EventToolStart
 	case "tool-end", "AfterTool":
@@ -101,4 +125,12 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func jsonString(v interface{}) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }

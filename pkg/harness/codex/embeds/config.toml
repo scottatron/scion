@@ -16,6 +16,9 @@
 check_for_update_on_startup = false
 approval_policy = "never"
 
+[features]
+codex_hooks = true
+
 # Note this notify script is commented out as experimental
 # TODO remove and replace when codex lands full hook support
 # notify = "sh ~/.codex/scion_notify.sh"
@@ -39,4 +42,3 @@ exporter = { otlp-grpc = {
   endpoint = "localhost:4317",
   headers = { "x-otlp-meta" = "abc123" }
 }}
-

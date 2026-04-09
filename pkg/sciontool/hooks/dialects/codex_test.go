@@ -42,6 +42,10 @@ func TestCodexDialect_EventMappings(t *testing.T) {
 		rawName  string
 		wantName string
 	}{
+		{"PreToolUse", hooks.EventToolStart},
+		{"PostToolUse", hooks.EventToolEnd},
+		{"UserPromptSubmit", hooks.EventPromptSubmit},
+		{"Stop", hooks.EventResponseComplete},
 		{"tool-start", hooks.EventToolStart},
 		{"tool-end", hooks.EventToolEnd},
 		{"model-start", hooks.EventModelStart},
@@ -83,4 +87,46 @@ func TestCodexDialect_StatusFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, event.Data.Success)
 	assert.Equal(t, "something failed", event.Data.Error)
+}
+
+func TestCodexDialect_CurrentHookPayloadShape(t *testing.T) {
+	d := NewCodexDialect()
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "PostToolUse",
+		"session_id":      "sess-123",
+		"tool_name":       "Bash",
+		"tool_input": map[string]interface{}{
+			"command": "git status --short",
+		},
+		"tool_response": map[string]interface{}{
+			"exit_code": float64(0),
+			"stdout":    " M file.txt",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventToolEnd, event.Name)
+	assert.Equal(t, "sess-123", event.Data.SessionID)
+	assert.Equal(t, "Bash", event.Data.ToolName)
+	assert.Equal(t, "git status --short", event.Data.ToolInput)
+	assert.Contains(t, event.Data.ToolOutput, "\"exit_code\":0")
+}
+
+func TestCodexDialect_UserPromptAndStopFields(t *testing.T) {
+	d := NewCodexDialect()
+
+	promptEvent, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "UserPromptSubmit",
+		"prompt":          "please investigate",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventPromptSubmit, promptEvent.Name)
+	assert.Equal(t, "please investigate", promptEvent.Data.Prompt)
+
+	stopEvent, err := d.Parse(map[string]interface{}{
+		"hook_event_name":        "Stop",
+		"last_assistant_message": "All checks passed",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventResponseComplete, stopEvent.Name)
+	assert.Equal(t, "All checks passed", stopEvent.Data.Message)
 }

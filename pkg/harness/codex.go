@@ -36,8 +36,8 @@ func (c *Codex) AdvancedCapabilities() api.HarnessAdvancedCapabilities {
 	return api.HarnessAdvancedCapabilities{
 		Harness: "codex",
 		Limits: api.HarnessLimitCapabilities{
-			MaxTurns:      api.CapabilityField{Support: api.SupportNo, Reason: "This harness has no hook dialect for turn events"},
-			MaxModelCalls: api.CapabilityField{Support: api.SupportNo, Reason: "This harness has no hook dialect for model events"},
+			MaxTurns:      api.CapabilityField{Support: api.SupportYes},
+			MaxModelCalls: api.CapabilityField{Support: api.SupportNo, Reason: "This harness does not emit model-end hook events"},
 			MaxDuration:   api.CapabilityField{Support: api.SupportYes},
 		},
 		Telemetry: api.HarnessTelemetryCapabilities{

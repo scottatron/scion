@@ -316,6 +316,8 @@ trust_level = "trusted"
 	out := string(data)
 	containsAll(t, out,
 		`custom_key = "keep-me"`,
+		`[features]`,
+		`codex_hooks = true`,
 		`[otel]`,
 		`enabled = true`,
 		`log_user_prompt = false`,
@@ -354,6 +356,7 @@ exporter = { otlp-grpc = {
 	data, err := os.ReadFile(filepath.Join(codexDir, "config.toml"))
 	requireNoErr(t, err)
 	out := string(data)
+	containsAll(t, out, `[features]`, `codex_hooks = true`)
 	if strings.Contains(out, "[otel]") {
 		t.Fatalf("did not expect [otel] section when telemetry disabled, got:\n%s", out)
 	}
@@ -387,7 +390,7 @@ func TestCodexProvision_ReconcilesTelemetryFromScionAgentConfig(t *testing.T) {
 
 	out, err := os.ReadFile(filepath.Join(agentHome, ".codex", "config.toml"))
 	requireNoErr(t, err)
-	containsAll(t, string(out), `[otel]`, `endpoint = "otel.local:4317"`, `enabled = true`, `log_user_prompt = false`)
+	containsAll(t, string(out), `[features]`, `codex_hooks = true`, `[otel]`, `endpoint = "otel.local:4317"`, `enabled = true`, `log_user_prompt = false`)
 }
 
 func TestCodexApplyTelemetrySettings_LogUserPromptFromFilter(t *testing.T) {
@@ -413,7 +416,7 @@ func TestCodexApplyTelemetrySettings_LogUserPromptFromFilter(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(agentHome, ".codex", "config.toml"))
 	requireNoErr(t, err)
 	out := string(data)
-	containsAll(t, out, `log_user_prompt = true`)
+	containsAll(t, out, `[features]`, `codex_hooks = true`, `log_user_prompt = true`)
 
 	// Now test exclusion takes precedence over inclusion.
 	telemetry.Filter.Events.Exclude = []string{"agent.user.prompt"}
@@ -424,6 +427,27 @@ func TestCodexApplyTelemetrySettings_LogUserPromptFromFilter(t *testing.T) {
 	requireNoErr(t, err)
 	out = string(data)
 	containsAll(t, out, `log_user_prompt = false`)
+}
+
+func TestCodexApplyTelemetrySettings_EnablesHooksFeatureWhenExistingSectionPresent(t *testing.T) {
+	agentHome := t.TempDir()
+	c := &Codex{}
+
+	codexDir := filepath.Join(agentHome, ".codex")
+	requireNoErr(t, os.MkdirAll(codexDir, 0755))
+	initial := `[features]
+codex_hooks = false
+smart_approvals = false
+`
+	requireNoErr(t, os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(initial), 0644))
+
+	err := c.ApplyTelemetrySettings(agentHome, nil, nil)
+	requireNoErr(t, err)
+
+	data, err := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	requireNoErr(t, err)
+	out := string(data)
+	containsAll(t, out, `[features]`, `codex_hooks = true`, `smart_approvals = false`)
 }
 
 func requireNoErr(t *testing.T, err error) {

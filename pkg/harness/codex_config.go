@@ -40,6 +40,7 @@ func (c *Codex) reconcileConfig(agentHome string, telemetry *api.TelemetryConfig
 
 	// Remove existing [otel] section — it will be rebuilt only if telemetry is enabled.
 	content = removeTOMLSection(content, "otel")
+	content = upsertTOMLKey(content, "features", "codex_hooks", "true")
 
 	// Reconcile [otel] only when telemetry is enabled.
 	if telemetry != nil && (telemetry.Enabled == nil || *telemetry.Enabled) {
