@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -466,5 +467,25 @@ func TestSeedHarnessConfig_CodexHooksJSON(t *testing.T) {
 	hooksPath := filepath.Join(targetDir, "home", ".codex", "hooks.json")
 	if _, err := os.Stat(hooksPath); err != nil {
 		t.Fatalf("expected hooks.json to be seeded at %s: %v", hooksPath, err)
+	}
+
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks.json at %s: %v", hooksPath, err)
+	}
+
+	content := string(data)
+	for _, expected := range []string{
+		`"SessionStart"`,
+		`"PermissionRequest"`,
+		`"PreToolUse"`,
+		`"PostToolUse"`,
+		`"UserPromptSubmit"`,
+		`"Stop"`,
+		`"startup|resume|clear"`,
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected hooks.json to contain %q, got:\n%s", expected, content)
+		}
 	}
 }

@@ -6,11 +6,14 @@ package dialects
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
-// CodexDialect parses Codex notify payloads.
+// CodexDialect parses Codex structured hook payloads and the legacy notify
+// payload that older Codex builds emitted on turn completion.
 type CodexDialect struct{}
 
 func NewCodexDialect() *CodexDialect {
@@ -46,10 +49,12 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 	}
 
 	// Extract tool input/output if available.
+	var toolInputObject map[string]interface{}
 	if val, ok := data["tool_input"]; ok {
 		if str, ok := val.(string); ok {
 			event.Data.ToolInput = str
 		} else if m, ok := val.(map[string]interface{}); ok {
+			toolInputObject = m
 			event.Data.ToolInput = firstNonEmptyString(getString(m, "command"), jsonString(val))
 		}
 	}
@@ -78,6 +83,10 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 		}
 	}
 
+	if rawName == "PermissionRequest" && event.Data.Message == "" {
+		event.Data.Message = permissionRequestMessage(event.Data.ToolName, toolInputObject)
+	}
+
 	// Extract token usage
 	extractTokens(data, &event.Data)
 
@@ -97,6 +106,8 @@ func (d *CodexDialect) normalizeEventName(name string) string {
 		return hooks.EventSessionStart
 	case "session-end", "SessionEnd":
 		return hooks.EventSessionEnd
+	case "PermissionRequest":
+		return hooks.EventNotification
 	case "UserPromptSubmit":
 		return hooks.EventPromptSubmit
 	case "Stop":
@@ -133,4 +144,18 @@ func jsonString(v interface{}) string {
 		return ""
 	}
 	return string(data)
+}
+
+func permissionRequestMessage(toolName string, toolInput map[string]interface{}) string {
+	description := strings.TrimSpace(getString(toolInput, "description"))
+	switch {
+	case toolName != "" && description != "":
+		return fmt.Sprintf("Permission requested for %s: %s", toolName, description)
+	case toolName != "":
+		return fmt.Sprintf("Permission requested for %s", toolName)
+	case description != "":
+		return fmt.Sprintf("Permission requested: %s", description)
+	default:
+		return "Permission requested"
+	}
 }

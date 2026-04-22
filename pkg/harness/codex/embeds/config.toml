@@ -19,8 +19,8 @@ approval_policy = "never"
 [features]
 codex_hooks = true
 
-# Note this notify script is commented out as experimental
-# TODO remove and replace when codex lands full hook support
+# Scion seeds hooks.json for structured Codex hook events. The legacy notify
+# script remains available if needed for older turn-complete-only integrations.
 # notify = "sh ~/.codex/scion_notify.sh"
 
 model = "gpt-5.4"

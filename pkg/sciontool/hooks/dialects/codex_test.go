@@ -43,6 +43,7 @@ func TestCodexDialect_EventMappings(t *testing.T) {
 		wantName string
 	}{
 		{"PreToolUse", hooks.EventToolStart},
+		{"PermissionRequest", hooks.EventNotification},
 		{"PostToolUse", hooks.EventToolEnd},
 		{"UserPromptSubmit", hooks.EventPromptSubmit},
 		{"Stop", hooks.EventResponseComplete},
@@ -129,4 +130,24 @@ func TestCodexDialect_UserPromptAndStopFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hooks.EventResponseComplete, stopEvent.Name)
 	assert.Equal(t, "All checks passed", stopEvent.Data.Message)
+}
+
+func TestCodexDialect_PermissionRequestFields(t *testing.T) {
+	d := NewCodexDialect()
+
+	event, err := d.Parse(map[string]interface{}{
+		"hook_event_name": "PermissionRequest",
+		"session_id":      "sess-456",
+		"tool_name":       "exec_command",
+		"tool_input": map[string]interface{}{
+			"command":     "git push",
+			"description": "Push the stacked branch",
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hooks.EventNotification, event.Name)
+	assert.Equal(t, "sess-456", event.Data.SessionID)
+	assert.Equal(t, "exec_command", event.Data.ToolName)
+	assert.Equal(t, "git push", event.Data.ToolInput)
+	assert.Equal(t, "Permission requested for exec_command: Push the stacked branch", event.Data.Message)
 }
