@@ -21,6 +21,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,67 @@ func TestSeedHarnessConfig_CodexNotifyScript(t *testing.T) {
 	scriptPath := filepath.Join(targetDir, "home", ".codex", "scion_notify.sh")
 	if _, err := os.Stat(scriptPath); err != nil {
 		t.Fatalf("expected notify script to be seeded at %s: %v", scriptPath, err)
+	}
+}
+
+func TestSeedHarnessConfig_CodexHooksJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "codex")
+
+	err := config.SeedHarnessConfig(targetDir, &harness.Codex{}, false)
+	if err != nil {
+		t.Fatalf("SeedHarnessConfig failed: %v", err)
+	}
+
+	hooksPath := filepath.Join(targetDir, "home", ".codex", "hooks.json")
+	if _, err := os.Stat(hooksPath); err != nil {
+		t.Fatalf("expected hooks.json to be seeded at %s: %v", hooksPath, err)
+	}
+
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("failed to read hooks.json at %s: %v", hooksPath, err)
+	}
+
+	content := string(data)
+	for _, expected := range []string{
+		`"SessionStart"`,
+		`"PermissionRequest"`,
+		`"PreToolUse"`,
+		`"PostToolUse"`,
+		`"UserPromptSubmit"`,
+		`"Stop"`,
+		`"startup|resume|clear"`,
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("expected hooks.json to contain %q, got:\n%s", expected, content)
+		}
+	}
+}
+
+func TestSeedHarnessConfig_CodexConfigModelRemainsTopLevel(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "codex")
+
+	err := config.SeedHarnessConfig(targetDir, &harness.Codex{}, false)
+	if err != nil {
+		t.Fatalf("SeedHarnessConfig failed: %v", err)
+	}
+
+	configPath := filepath.Join(targetDir, "home", ".codex", "config.toml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("failed to read config.toml at %s: %v", configPath, err)
+	}
+
+	content := string(data)
+	modelIdx := strings.Index(content, `model = "gpt-5.4"`)
+	featuresIdx := strings.Index(content, `[features]`)
+	if modelIdx == -1 || featuresIdx == -1 {
+		t.Fatalf("expected config.toml to contain model and [features], got:\n%s", content)
+	}
+	if modelIdx > featuresIdx {
+		t.Fatalf("expected model to remain top-level before [features], got:\n%s", content)
 	}
 }
 
