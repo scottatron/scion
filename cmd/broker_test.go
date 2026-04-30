@@ -57,3 +57,20 @@ func TestBrokerRestartCmdMetadata(t *testing.T) {
 func TestBrokerCmdLongDescriptionIncludesRestart(t *testing.T) {
 	assert.Contains(t, brokerCmd.Long, "restart")
 }
+
+func TestBrokerStartServerArgsRunsDelegatedServerInForeground(t *testing.T) {
+	originalPort := brokerStartPort
+	originalAutoProvide := brokerStartAutoProvide
+	originalDebug := brokerStartDebug
+	t.Cleanup(func() {
+		brokerStartPort = originalPort
+		brokerStartAutoProvide = originalAutoProvide
+		brokerStartDebug = originalDebug
+	})
+
+	brokerStartPort = DefaultBrokerPort
+	brokerStartAutoProvide = false
+	brokerStartDebug = false
+
+	assert.Equal(t, []string{"--foreground", "--production", "--enable-runtime-broker"}, brokerStartServerArgs())
+}

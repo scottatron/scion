@@ -782,6 +782,20 @@ func isServerDaemonManagingBroker(globalDir string) (running bool, pid int) {
 	return true, serverPID
 }
 
+func brokerStartServerArgs() []string {
+	serverArgs := []string{"--foreground", "--production", "--enable-runtime-broker"}
+	if brokerStartPort != DefaultBrokerPort {
+		serverArgs = append(serverArgs, fmt.Sprintf("--runtime-broker-port=%d", brokerStartPort))
+	}
+	if brokerStartAutoProvide {
+		serverArgs = append(serverArgs, "--auto-provide")
+	}
+	if brokerStartDebug {
+		serverArgs = append(serverArgs, "--debug")
+	}
+	return serverArgs
+}
+
 func runBrokerStart(cmd *cobra.Command, args []string) error {
 	// Get global directory for daemon files
 	globalDir, err := config.GetGlobalDir()
@@ -798,16 +812,7 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 	if brokerStartForeground {
 		// Build args for server start (just the flags, no command names)
 		// Use --production to avoid workstation defaults (we only want the broker)
-		serverArgs := []string{"--production", "--enable-runtime-broker"}
-		if brokerStartPort != DefaultBrokerPort {
-			serverArgs = append(serverArgs, fmt.Sprintf("--runtime-broker-port=%d", brokerStartPort))
-		}
-		if brokerStartAutoProvide {
-			serverArgs = append(serverArgs, "--auto-provide")
-		}
-		if brokerStartDebug {
-			serverArgs = append(serverArgs, "--debug")
-		}
+		serverArgs := brokerStartServerArgs()
 
 		fmt.Printf("Starting broker in foreground on port %d...\n", brokerStartPort)
 		fmt.Println("Press Ctrl+C to stop.")

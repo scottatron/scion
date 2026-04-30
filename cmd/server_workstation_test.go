@@ -158,14 +158,23 @@ func TestProductionModeWithExplicitFlags(t *testing.T) {
 
 func TestBrokerDelegationUsesProductionMode(t *testing.T) {
 	t.Cleanup(resetServerFlags)
+	originalPort := brokerStartPort
+	originalAutoProvide := brokerStartAutoProvide
+	originalDebug := brokerStartDebug
+	t.Cleanup(func() {
+		brokerStartPort = originalPort
+		brokerStartAutoProvide = originalAutoProvide
+		brokerStartDebug = originalDebug
+	})
 
-	// Simulate what broker start does: parse --production --enable-runtime-broker
+	// Simulate what broker start does: parse --foreground --production --enable-runtime-broker
 	resetServerFlags()
-	require.NoError(t, serverStartCmd.ParseFlags([]string{
-		"--production",
-		"--enable-runtime-broker",
-	}))
+	brokerStartPort = DefaultBrokerPort
+	brokerStartAutoProvide = false
+	brokerStartDebug = false
+	require.NoError(t, serverStartCmd.ParseFlags(brokerStartServerArgs()))
 
+	assert.True(t, serverStartForeground, "foreground flag should be set")
 	assert.True(t, productionMode, "production flag should be set")
 	assert.True(t, enableRuntimeBroker, "runtime broker should be enabled")
 	assert.False(t, enableHub, "hub should NOT be enabled (broker-only)")
