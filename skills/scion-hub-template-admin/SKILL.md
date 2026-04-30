@@ -112,7 +112,7 @@ scion --non-interactive hub grove create https://github.com/org/repo.git --slug 
 Start agents against that grove by slug:
 
 ```bash
-scion --non-interactive start <agent-name> --grove <grove-slug> "task" --notify
+cd "$HOME" && scion --non-interactive --format json --grove <grove-slug> start <agent-name> "task" --notify
 ```
 
 Remember that Hub-mode Git groves clone over HTTPS on the broker; local worktrees and SSH credentials are not the provisioning path.
@@ -124,6 +124,7 @@ When building an orchestrator/worker team for Hub mode:
 - Create exactly one orchestrator template and one or more worker templates.
 - Keep role instructions in `agents.md`; do not duplicate generic Scion CLI reference material.
 - Tell orchestrators to start workers with `--notify`.
+- Tell orchestrators that launching workers from an inherited agent/tool cwd can accidentally bootstrap that local path before Hub creation. Prefer direct Hub dispatch; if using `scion start`, run it from `$HOME` or a tiny inert cwd rather than `/opt/data`, `/workspace`, fakeowner mounts, or large repo roots.
 - Tell orchestrators to use `scion look` to collect worker output.
 - Tell orchestrators to use `scion messages` as the durable worker-result channel.
 - Tell workers to send final summaries and status updates back through Scion messages.
@@ -134,7 +135,7 @@ When building an orchestrator/worker team for Hub mode:
 Minimal orchestrator reminder:
 
 ```markdown
-When starting workers, use `scion --non-interactive start <name> "task" --type <template> --notify`.
+When starting workers from inside an agent or shell tool, avoid the inherited cwd. Prefer direct Hub dispatch, or run `cd "$HOME" && scion --non-interactive --format json --grove <grove> start <name> "task" --type <template> --notify`.
 When waiting, run `sciontool status blocked "Waiting for worker agents to complete"`.
 Ask workers to send their final summaries through Scion messages.
 Use `scion --non-interactive messages --json` and `scion --non-interactive messages --all --json` to collect worker results.

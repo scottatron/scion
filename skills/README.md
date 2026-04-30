@@ -7,7 +7,7 @@ Skill definitions that enable agents to manage Scion from within a session.
 - **`scion/SKILL.md`** - General Scion documentation covering local agent management, template operations, and configuration commands.
 - **`scion/scripts/`** - Backing shell scripts for local/common operations (start, list, status, message).
 - **`scion-hub-agent-operations/SKILL.md`** - Hub-only agent operations: status, remote start, list, look, message, and notifications.
-- **`scion-hub-agent-operations/scripts/`** - Hub-safe wrappers that add `--non-interactive` and notification defaults.
+- **`scion-hub-agent-operations/scripts/`** - Hub-safe wrappers that add `--non-interactive`, notification defaults, safe-cwd launch behavior, and direct Hub dispatch helpers.
 - **`scion-hub-template-admin/SKILL.md`** - Hub-only template, harness-config, env, secret, grove, and orchestrator-team administration.
 - **`team-creation/SKILL.md`** - General multi-agent template creation guidance.
 
