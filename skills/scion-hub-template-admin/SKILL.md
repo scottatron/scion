@@ -125,6 +125,8 @@ When building an orchestrator/worker team for Hub mode:
 - Keep role instructions in `agents.md`; do not duplicate generic Scion CLI reference material.
 - Tell orchestrators to start workers with `--notify`.
 - Tell orchestrators to use `scion look` to collect worker output.
+- Tell orchestrators to use `scion messages` as the durable worker-result channel.
+- Tell workers to send final summaries and status updates back through Scion messages.
 - Tell orchestrators to call `sciontool status blocked "Waiting for <reason>"` while waiting.
 - Publish all templates needed by the team before starting the orchestrator.
 - Start the orchestrator through Hub with `--notify`.
@@ -134,5 +136,7 @@ Minimal orchestrator reminder:
 ```markdown
 When starting workers, use `scion --non-interactive start <name> "task" --type <template> --notify`.
 When waiting, run `sciontool status blocked "Waiting for worker agents to complete"`.
-Use `scion --non-interactive look <name>` to inspect worker output before messaging them.
+Ask workers to send their final summaries through Scion messages.
+Use `scion --non-interactive messages --json` and `scion --non-interactive messages --all --json` to collect worker results.
+Use `scion --non-interactive look <name>` only when you need live terminal context before messaging them.
 ```
