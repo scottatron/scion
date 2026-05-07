@@ -540,6 +540,15 @@ func parseCommaSeparatedList(s string) []string {
 // Handles camelCase conversion for known fields like clientId, clientSecret.
 // Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
 func envKeyToConfigKey(envKey string) string {
+	normalized := strings.ToLower(envKey)
+	normalized = strings.ReplaceAll(normalized, "__", "_")
+	switch normalized {
+	case "broker_hubendpoint", "broker_hub_endpoint":
+		return "runtimeBroker.hubEndpoint"
+	case "broker_containerhubendpoint", "broker_container_hub_endpoint":
+		return "runtimeBroker.containerHubEndpoint"
+	}
+
 	// Known camelCase field mappings
 	camelCaseFields := map[string]string{
 		"clientid":             "clientId",

@@ -507,6 +507,28 @@ runtimeBroker:
 			t.Errorf("expected RuntimeBroker.ContainerHubEndpoint 'http://host.containers.internal:8080', got %q", cfg.RuntimeBroker.ContainerHubEndpoint)
 		}
 	})
+
+	t.Run("from server env var", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_SERVER_BROKER_CONTAINER_HUB_ENDPOINT", "http://scion-hub:11011")
+
+		if err := os.WriteFile(filepath.Join(tmpDir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  broker: {}
+`), 0644); err != nil {
+			t.Fatalf("failed to write settings: %v", err)
+		}
+
+		cfg, err := LoadGlobalConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		if cfg.RuntimeBroker.ContainerHubEndpoint != "http://scion-hub:11011" {
+			t.Errorf("expected RuntimeBroker.ContainerHubEndpoint 'http://scion-hub:11011', got %q", cfg.RuntimeBroker.ContainerHubEndpoint)
+		}
+	})
 }
 
 func TestSettingsYamlEnvVarOverride(t *testing.T) {
