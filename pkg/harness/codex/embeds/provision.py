@@ -265,7 +265,7 @@ def _list_contains(items: list[Any], target: str) -> bool:
 def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
     env = env or {}
     for key in ("SCION_CODEX_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
-        v = (env.get(key) or "").strip()
+        v = (env.get(key) or os.environ.get(key) or "").strip()
         if v:
             return v
     if telemetry and isinstance(telemetry.get("cloud"), dict):
@@ -278,7 +278,7 @@ def _resolve_endpoint(telemetry: dict[str, Any] | None, env: dict[str, str] | No
 def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> str:
     env = env or {}
     for key in ("SCION_CODEX_OTEL_PROTOCOL", "SCION_OTEL_PROTOCOL"):
-        v = (env.get(key) or "").strip()
+        v = (env.get(key) or os.environ.get(key) or "").strip()
         if v:
             return v
     if telemetry and isinstance(telemetry.get("cloud"), dict):
@@ -288,7 +288,11 @@ def _resolve_protocol(telemetry: dict[str, Any] | None, env: dict[str, str] | No
     return "grpc"
 
 
-def _telemetry_enabled(telemetry: dict[str, Any] | None) -> bool:
+def _telemetry_enabled(telemetry: dict[str, Any] | None, env: dict[str, str] | None) -> bool:
+    env = env or {}
+    for key in ("SCION_CODEX_OTEL_ENDPOINT", "SCION_OTEL_ENDPOINT"):
+        if (env.get(key) or os.environ.get(key) or "").strip():
+            return True
     if not telemetry:
         return False
     enabled = telemetry.get("enabled")
@@ -340,7 +344,7 @@ def _reconcile_codex_toml(telemetry: dict[str, Any] | None, env: dict[str, str] 
         with open(config_path, "r", encoding="utf-8") as f:
             content = f.read()
     content = _strip_otel_section(content)
-    if _telemetry_enabled(telemetry):
+    if _telemetry_enabled(telemetry, env):
         section = _build_otel_section(telemetry or {}, env)
         content = content.rstrip("\n\t ") + "\n\n" + section
     content = content.strip() + "\n"

@@ -42,8 +42,9 @@ func (c *Codex) reconcileConfig(agentHome string, telemetry *api.TelemetryConfig
 	content = removeTOMLSection(content, "otel")
 	content = upsertTOMLKey(content, "features", "codex_hooks", "true")
 
-	// Reconcile [otel] only when telemetry is enabled.
-	if telemetry != nil && (telemetry.Enabled == nil || *telemetry.Enabled) {
+	// Reconcile [otel] when telemetry is enabled, or when the Codex OTEL
+	// endpoint is explicitly provided by the harness config/env overlay.
+	if codexOTELEnabled(telemetry, env) {
 		endpoint := resolveCodexOTELEndpoint(telemetry, env)
 		protocol := resolveCodexOTELProtocol(telemetry, env)
 
@@ -81,6 +82,16 @@ func (c *Codex) reconcileConfig(agentHome string, telemetry *api.TelemetryConfig
 	}
 
 	return os.WriteFile(configPath, []byte(strings.TrimSpace(content)+"\n"), 0644)
+}
+
+func codexOTELEnabled(telemetry *api.TelemetryConfig, env map[string]string) bool {
+	if firstNonEmpty(
+		resolveEnv("SCION_CODEX_OTEL_ENDPOINT", env),
+		resolveEnv("SCION_OTEL_ENDPOINT", env),
+	) != "" {
+		return true
+	}
+	return telemetry != nil && (telemetry.Enabled == nil || *telemetry.Enabled)
 }
 
 func resolveCodexOTELEndpoint(telemetry *api.TelemetryConfig, env map[string]string) string {

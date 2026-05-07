@@ -655,6 +655,101 @@ exporter = { otlp-grpc = {
 	}
 }
 
+func TestCodexProvisionScript_Integration_ExplicitCodexOTELOverridesDisabledTelemetry(t *testing.T) {
+	pyPath, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	dir := seedCodexDir(t)
+	scriptPath := filepath.Join(dir, "provision.py")
+
+	home := t.TempDir()
+	bundle := filepath.Join(home, ".scion", "harness")
+	codexDir := filepath.Join(home, ".codex")
+	for _, sub := range []string{"inputs", "outputs", "secrets"} {
+		if err := os.MkdirAll(filepath.Join(bundle, sub), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(`approval_policy = "never"`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "secrets", "OPENAI_API_KEY"), []byte("sk-test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	telemetryPayload := map[string]any{
+		"schema_version": 1,
+		"telemetry": map[string]any{
+			"enabled": false,
+		},
+	}
+	telBytes, _ := json.Marshal(telemetryPayload)
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "telemetry.json"), telBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	candidates := map[string]any{
+		"env_vars": []string{"OPENAI_API_KEY"},
+		"env_secret_files": map[string]string{
+			"OPENAI_API_KEY": filepath.Join(bundle, "secrets", "OPENAI_API_KEY"),
+		},
+	}
+	candBytes, _ := json.Marshal(candidates)
+	if err := os.WriteFile(filepath.Join(bundle, "inputs", "auth-candidates.json"), candBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest := map[string]any{
+		"schema_version":     1,
+		"command":            "provision",
+		"agent_name":         "test-agent",
+		"agent_home":         home,
+		"agent_workspace":    "/workspace",
+		"harness_bundle_dir": bundle,
+		"harness_config":     map[string]any{"harness": "codex"},
+		"outputs": map[string]any{
+			"env":           filepath.Join(bundle, "outputs", "env.json"),
+			"resolved_auth": filepath.Join(bundle, "outputs", "resolved-auth.json"),
+		},
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+	manifestPath := filepath.Join(bundle, "manifest.json")
+	if err := os.WriteFile(manifestPath, manifestBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(pyPath, scriptPath, "--manifest", manifestPath)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"SCION_CODEX_OTEL_ENDPOINT=localhost:4317",
+		"SCION_CODEX_OTEL_PROTOCOL=grpc",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\noutput: %s", err, out)
+	}
+
+	tomlBytes, err := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tomlStr := string(tomlBytes)
+	for _, want := range []string{
+		`[otel]`,
+		`enabled = true`,
+		`exporter = { otlp-grpc = {`,
+		`endpoint = "localhost:4317"`,
+	} {
+		if !strings.Contains(tomlStr, want) {
+			t.Errorf("config.toml missing %q\ngot:\n%s", want, tomlStr)
+		}
+	}
+}
+
 // TestCodexProvisionScript_Integration_LogUserPromptFromFilter exercises the
 // telemetry filter precedence (exclude beats include), matching the compiled
 // harness's behavior in TestCodexApplyTelemetrySettings_LogUserPromptFromFilter.

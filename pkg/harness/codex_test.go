@@ -365,6 +365,33 @@ exporter = { otlp-grpc = {
 	}
 }
 
+func TestCodexApplyTelemetrySettings_ExplicitCodexOTELOverridesDisabledTelemetry(t *testing.T) {
+	agentHome := t.TempDir()
+	c := &Codex{}
+
+	codexDir := filepath.Join(agentHome, ".codex")
+	requireNoErr(t, os.MkdirAll(codexDir, 0755))
+	requireNoErr(t, os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(`approval_policy = "never"`), 0644))
+
+	enabled := false
+	telemetry := &api.TelemetryConfig{Enabled: &enabled}
+
+	err := c.ApplyTelemetrySettings(agentHome, telemetry, map[string]string{
+		"SCION_CODEX_OTEL_ENDPOINT": "localhost:4317",
+		"SCION_CODEX_OTEL_PROTOCOL": "grpc",
+	})
+	requireNoErr(t, err)
+
+	data, err := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	requireNoErr(t, err)
+	containsAll(t, string(data),
+		`[otel]`,
+		`enabled = true`,
+		`exporter = { otlp-grpc = {`,
+		`endpoint = "localhost:4317"`,
+	)
+}
+
 func TestCodexProvision_ReconcilesTelemetryFromScionAgentConfig(t *testing.T) {
 	agentDir := t.TempDir()
 	agentHome := filepath.Join(agentDir, "home")
