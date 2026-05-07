@@ -657,6 +657,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// resolved harness/profile env wins; otherwise localhost Hub endpoints use
 	// host networking so containers can reach the host loopback.
 	dockerNetworkMode := strings.TrimSpace(opts.Env["SCION_NETWORK_MODE"])
+	if dockerNetworkMode == "" && finalScionCfg != nil && finalScionCfg.Env != nil {
+		dockerNetworkMode = strings.TrimSpace(finalScionCfg.Env["SCION_NETWORK_MODE"])
+		if dockerNetworkMode != "" {
+			opts.Env["SCION_NETWORK_MODE"] = dockerNetworkMode
+		}
+	}
 	if dockerNetworkMode == "" {
 		dockerNetworkMode = runtime.ResolveDockerNetworking(m.Runtime.Name(), opts.Env)
 		if dockerNetworkMode != "" {

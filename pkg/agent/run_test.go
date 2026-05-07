@@ -2536,10 +2536,10 @@ profiles:
 		Name:      "explicit-network",
 		GrovePath: projectScionDir,
 		NoAuth:    true,
-		Env: map[string]string{
-			"SCION_HUB_ENDPOINT": "http://localhost:11011",
+		InlineConfig: &api.ScionConfig{Env: map[string]string{
 			"SCION_NETWORK_MODE": "wonsley_default",
-		},
+		}},
+		Env: map[string]string{"SCION_HUB_ENDPOINT": "http://localhost:11011"},
 	})
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
