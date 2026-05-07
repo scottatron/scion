@@ -12,8 +12,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Environment variable names for OTel logging configuration.
@@ -30,17 +28,17 @@ func NewLoggerProvider(ctx context.Context, config OTelConfig) (log.LoggerProvid
 		return nil, func() {}, nil
 	}
 
-	// Build gRPC options
-	var opts []grpc.DialOption
+	// Match Scion's broader OTLP behavior and use the exporter-level insecure
+	// option for plaintext OTLP/gRPC collectors such as local LGTM.
+	opts := []otlploggrpc.Option{
+		otlploggrpc.WithEndpoint(config.Endpoint),
+	}
 	if config.Insecure {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		opts = append(opts, otlploggrpc.WithInsecure())
 	}
 
 	// Create the exporter
-	exporter, err := otlploggrpc.New(ctx,
-		otlploggrpc.WithEndpoint(config.Endpoint),
-		otlploggrpc.WithDialOption(opts...),
-	)
+	exporter, err := otlploggrpc.New(ctx, opts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating OTLP log exporter: %w", err)
 	}
