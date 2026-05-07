@@ -2488,3 +2488,64 @@ runtimes:
 		t.Errorf("GOOGLE_CLOUD_REGION = %q, want %q", got, "us-central1")
 	}
 }
+
+func TestStartHonorsExplicitDockerNetworkMode(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	originalHome := os.Getenv("HOME")
+	defer os.Setenv("HOME", originalHome)
+	os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	os.MkdirAll(hcDir, 0755)
+	os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	os.MkdirAll(tplDir, 0755)
+	os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			capturedConfig = cfg
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+	_, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:      "explicit-network",
+		GrovePath: projectScionDir,
+		NoAuth:    true,
+		Env: map[string]string{
+			"SCION_HUB_ENDPOINT": "http://localhost:11011",
+			"SCION_NETWORK_MODE": "wonsley_default",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	if got := capturedConfig.NetworkMode; got != "wonsley_default" {
+		t.Errorf("NetworkMode = %q, want %q", got, "wonsley_default")
+	}
+}
