@@ -2059,6 +2059,9 @@ func (s *sqliteWebChatStore) runMigrations() error {
 	if err := s.reconcileTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation reconcile: %w", err)
 	}
+	if err := s.reconcileTopicLastMessages(); err != nil {
+		return fmt.Errorf("topic last_message reconcile: %w", err)
+	}
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
@@ -2384,6 +2387,75 @@ func (s *sqliteWebChatStore) reconcileTopicConversations() error {
 		}
 	}
 
+	return s.markMigrationCompleted(migrationName)
+}
+
+func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
+	const migrationName = "topic_last_message_reconcile"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	exists, err := s.tableExists(context.Background(), "messages")
+	if err != nil {
+		return err
+	}
+	if !exists || !s.hasTableColumn("messages", "type") || !s.hasTableColumn("messages", "conversation_id") || !s.hasTableColumn("messages", "channel") || !s.hasTableColumn("messages", "thread_id") || !s.hasTableColumn("messages", "created") {
+		return nil
+	}
+	type update struct {
+		topicID, lastID, latestID string
+		activity                  string
+		latestCreatedRaw          any
+	}
+	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.last_message_id, ''), COALESCE(t.last_activity_at, ''), m.id, m.created FROM webchat_topic t JOIN messages m ON m.id = (SELECT m2.id FROM messages m2 WHERE m2.channel = 'web' AND m2.type <> 'mention' AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND m2.conversation_id = t.conversation_id) OR m2.thread_id = t.id) ORDER BY m2.created DESC, m2.id DESC LIMIT 1) WHERE t.deleted_at IS NULL`)
+	if err != nil {
+		return err
+	}
+	var updates []update
+	for rows.Next() {
+		var u update
+		if err := rows.Scan(&u.topicID, &u.lastID, &u.activity, &u.latestID, &u.latestCreatedRaw); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		latestCreated := parseSQLiteNullableTime(u.latestCreatedRaw)
+		curActivity := parseSQLiteTime(u.activity)
+		if u.lastID != u.latestID {
+			newActivity := curActivity
+			if latestCreated != nil && latestCreated.After(newActivity) {
+				newActivity = *latestCreated
+			}
+			if newActivity.IsZero() {
+				newActivity = time.Now().UTC()
+			}
+			u.activity = newActivity.UTC().Format(time.RFC3339Nano)
+			updates = append(updates, u)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if len(updates) > 0 {
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		for _, u := range updates {
+			if _, err := tx.Exec(`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`, u.latestID, u.activity, u.topicID); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
 	return s.markMigrationCompleted(migrationName)
 }
 

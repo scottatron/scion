@@ -463,3 +463,148 @@ func TestTopicReconcile_Postgres(t *testing.T) {
 		return NewWebChatStore(db, "postgres")
 	})
 }
+
+func assertTopicLastMessageReconcile(t *testing.T, db *sql.DB, dialect string, newStore func() WebChatStore) {
+	t.Helper()
+	rebind := func(q string) string {
+		if dialect != "postgres" {
+			return q
+		}
+		var out strings.Builder
+		n := 0
+		for i := 0; i < len(q); i++ {
+			if q[i] == '?' {
+				n++
+				out.WriteString(fmt.Sprintf("$%d", n))
+			} else {
+				out.WriteByte(q[i])
+			}
+		}
+		return out.String()
+	}
+
+	if dialect == "postgres" {
+		_, err := db.Exec(`CREATE TABLE IF NOT EXISTS messages (
+			id              UUID PRIMARY KEY,
+			project_id      UUID,
+			sender          TEXT NOT NULL DEFAULT 'agent:test',
+			recipient       TEXT NOT NULL DEFAULT 'thread:test',
+			msg             TEXT NOT NULL DEFAULT '',
+			type            TEXT NOT NULL DEFAULT 'instruction',
+			channel         TEXT,
+			thread_id       TEXT,
+			conversation_id UUID,
+			created         TIMESTAMPTZ NOT NULL
+		)`)
+		require.NoError(t, err)
+	}
+
+	projectID := uuid.NewString()
+	base := time.Date(2026, 11, 25, 5, 0, 0, 0, time.UTC)
+	topicTime := func(ts time.Time) any {
+		if dialect == "postgres" {
+			return ts
+		}
+		return ts.UTC().Format(time.RFC3339Nano)
+	}
+	seedTopic := func(topicID, convID, name, lastMsgID string, activity time.Time, deletedAt *time.Time) {
+		t.Helper()
+		var convArg, lastMsgArg, delArg any
+		if convID != "" {
+			convArg = convID
+		}
+		if lastMsgID != "" {
+			lastMsgArg = lastMsgID
+		}
+		if deletedAt != nil {
+			delArg = topicTime(*deletedAt)
+		}
+		_, err := db.Exec(rebind(`INSERT INTO webchat_topic (id, project_id, name, is_general, conversation_id, created_by, created_at, last_message_id, last_activity_at, deleted_at)
+			 VALUES (?, ?, ?, ?, ?, 'user-1', ?, ?, ?, ?)`),
+			topicID, projectID, name, false, convArg, topicTime(base), lastMsgArg, topicTime(activity), delArg)
+		require.NoError(t, err)
+	}
+	seedMsg := func(msgID, channel, msgType, threadID, convID string, created time.Time) {
+		t.Helper()
+		var convArg any
+		if convID != "" {
+			convArg = convID
+		}
+		if dialect == "postgres" {
+			_, err := db.Exec(`INSERT INTO messages (id, project_id, sender, recipient, msg, type, channel, thread_id, conversation_id, created)
+				 VALUES ($1, $2, 'agent:pinky', 'thread:t', 'body', $3, $4, $5, $6, $7)`,
+				msgID, projectID, msgType, channel, threadID, convArg, created)
+			require.NoError(t, err)
+			return
+		}
+		_, err := db.Exec(`INSERT INTO messages (id, project_id, sender, recipient, msg, type, channel, thread_id, conversation_id, created)
+			 VALUES (?, ?, 'agent:pinky', 'thread:t', 'body', ?, ?, ?, ?, ?)`,
+			msgID, projectID, msgType, channel, threadID, convID, created.UTC().Format(time.RFC3339Nano))
+		require.NoError(t, err)
+	}
+
+	tStale, cStale := uuid.NewString(), uuid.NewString()
+	m1, m2, m3, m4 := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	seedTopic(tStale, cStale, "auth", m1, base.Add(time.Minute), nil)
+	seedMsg(m1, "web", "reply", tStale, cStale, base.Add(time.Minute))
+	seedMsg(m2, "web", "instruction", "", cStale, base.Add(5*time.Minute))
+	seedMsg(m3, "web", "mention", tStale, cStale, base.Add(6*time.Minute))
+	seedMsg(m4, "discord", "chat", tStale, cStale, base.Add(7*time.Minute))
+	tEmpty, mEmpty := uuid.NewString(), uuid.NewString()
+	seedTopic(tEmpty, "", "general", "", base, nil)
+	seedMsg(mEmpty, "web", "instruction", tEmpty, "", base.Add(3*time.Minute))
+	tDeleted, mDelOld, mDelNew := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	delAt := base.Add(2 * time.Minute)
+	seedTopic(tDeleted, "", "deleted-topic", mDelOld, base, &delAt)
+	seedMsg(mDelNew, "web", "instruction", tDeleted, "", base.Add(4*time.Minute))
+	tNoMsgs := uuid.NewString()
+	seedTopic(tNoMsgs, "", "empty-topic", "", base, nil)
+	_, err := db.Exec(rebind(`DELETE FROM webchat_migrations WHERE name = ?`), "topic_last_message_reconcile")
+	require.NoError(t, err)
+	require.NoError(t, newStore().Init())
+	readLastMsg := func(topicID string) (string, time.Time) {
+		t.Helper()
+		if dialect == "postgres" {
+			var lastID string
+			var act time.Time
+			require.NoError(t, db.QueryRow(`SELECT COALESCE(last_message_id, ''), last_activity_at FROM webchat_topic WHERE id = $1`, topicID).Scan(&lastID, &act))
+			return lastID, act.UTC()
+		}
+		var lastID, actStr string
+		require.NoError(t, db.QueryRow(`SELECT COALESCE(last_message_id, ''), COALESCE(last_activity_at, '') FROM webchat_topic WHERE id = ?`, topicID).Scan(&lastID, &actStr))
+		return lastID, parseSQLiteTime(actStr)
+	}
+	check := func(label string) {
+		t.Helper()
+		var migCount int
+		require.NoError(t, db.QueryRow(rebind(`SELECT COUNT(*) FROM webchat_migrations WHERE name = ?`), "topic_last_message_reconcile").Scan(&migCount))
+		assert.Equal(t, 1, migCount, "%s: migration recorded once", label)
+		gotStale, actStale := readLastMsg(tStale)
+		assert.Equal(t, m2, gotStale, "%s: stale topic advances to newest non-mention web message", label)
+		assert.True(t, nullableTimesEqualMicro(ptrTime(base.Add(5*time.Minute)), &actStale), "%s: stale topic activity advances", label)
+		gotEmpty, _ := readLastMsg(tEmpty)
+		assert.Equal(t, mEmpty, gotEmpty, "%s: unstamped topic populated", label)
+		gotDel, _ := readLastMsg(tDeleted)
+		assert.Equal(t, mDelOld, gotDel, "%s: deleted topic untouched", label)
+		gotNone, _ := readLastMsg(tNoMsgs)
+		assert.Empty(t, gotNone, "%s: empty topic stays empty", label)
+	}
+	check("after first reconcile")
+	require.NoError(t, newStore().Init())
+	check("after second Init")
+	_, err = db.Exec(rebind(`DELETE FROM webchat_migrations WHERE name = ?`), "topic_last_message_reconcile")
+	require.NoError(t, err)
+	require.NoError(t, newStore().Init())
+	check("after forced re-reconcile")
+}
+
+func TestTopicLastMessageReconcile_SQLite(t *testing.T) {
+	_, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+	assertTopicLastMessageReconcile(t, db, "sqlite", func() WebChatStore { return NewWebChatStore(db, "sqlite") })
+}
+
+func TestTopicLastMessageReconcile_Postgres(t *testing.T) {
+	db, _ := setupPostgresWithConversations(t)
+	assertTopicLastMessageReconcile(t, db, "postgres", func() WebChatStore { return NewWebChatStore(db, "postgres") })
+}

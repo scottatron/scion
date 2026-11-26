@@ -26,8 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -603,4 +605,105 @@ func TestDEF159_Fixed_NormalPathBackfillsChannelAndThreadID(t *testing.T) {
 	}
 	assert.True(t, found,
 		"DEF-159 fixed: message with backfilled Channel='web' MUST appear in history")
+}
+
+// Direct outbound agent replies must advance chat watermarks before publishing SSE.
+func TestDirectOutbound_GroupTopicReply_AdvancesTopicWatermarkAndPersistsReadState(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	require.Nil(t, srv.GetMessageBrokerProxy())
+	enableReadSwitch(t, srv)
+	bindProjectMember(t, s, project.ID, user.ID)
+
+	topicID, convID := api.NewUUID(), api.NewUUID()
+	now := time.Now().UTC().Add(-2 * time.Minute)
+	extRef, err := messaging.ThreadConversationExternalRef(project.ID, topicID)
+	require.NoError(t, err)
+	_, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{ID: convID, ProjectID: &project.ID, Kind: "group", Surface: "native", ExternalRef: extRef, DisplayName: "auth", DriftState: "active"})
+	require.NoError(t, err)
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "auth", ConversationID: convID, CreatedBy: user.ID, CreatedAt: now, LastActivityAt: now}))
+
+	humanMsg := &store.Message{ID: api.NewUUID(), ProjectID: project.ID, Sender: "user:" + user.Email, SenderID: user.ID, Recipient: "agent:" + agent.Slug, RecipientID: agent.ID, Msg: "please check auth", Type: messages.TypeInstruction, Channel: "web", ThreadID: topicID, ConversationID: convID, DispatchState: store.MessageDispatchDispatched, CreatedAt: now.Add(10 * time.Second)}
+	require.NoError(t, s.CreateMessage(ctx, humanMsg))
+	require.NoError(t, wcs.TouchTopicActivity(ctx, topicID, humanMsg.ID))
+	require.NoError(t, wcs.SetReadState(ctx, user.ID, topicID, humanMsg.ID))
+	require.NoError(t, s.EnsureParticipant(ctx, &store.ConversationParticipant{ConversationID: convID, PrincipalKind: "user", PrincipalID: user.ID, Role: "member"}))
+
+	cep := NewChannelEventPublisher()
+	t.Cleanup(cep.Close)
+	srv.SetEventPublisher(cep)
+	topicEvents, unsub := cep.Subscribe("project." + project.ID + ".chat.message")
+	defer unsub()
+	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "auth looks good", "conv:"+convID)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var sendResp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sendResp))
+	require.NotEmpty(t, sendResp.MessageID)
+	select {
+	case <-topicEvents:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for project chat.message SSE event")
+	}
+	topicAfterSend, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	require.Equal(t, sendResp.MessageID, topicAfterSend.LastMessageID)
+	unreadRec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 1}, getUnreadCount(t, unreadRec))
+	readRec := doRequestAsUser(t, srv, user, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/read", map[string]string{"messageId": sendResp.MessageID})
+	require.Equal(t, http.StatusOK, readRec.Code, "POST /read: %s", readRec.Body.String())
+	threadsRec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/chat/spaces/"+project.ID+"/threads", nil)
+	require.Equal(t, http.StatusOK, threadsRec.Code)
+	var threadsResp chatTopicListResponse
+	require.NoError(t, json.Unmarshal(threadsRec.Body.Bytes(), &threadsResp))
+	require.Len(t, threadsResp.Threads, 1)
+	assert.False(t, threadsResp.Threads[0].HasUnread)
+	assert.Equal(t, sendResp.MessageID, threadsResp.Threads[0].LastMessageID)
+	assert.Equal(t, sendResp.MessageID, threadsResp.Threads[0].LastReadMessageID)
+	spacesRec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/chat/spaces", nil)
+	require.Equal(t, http.StatusOK, spacesRec.Code)
+	var spacesResp chatSpacesResponse
+	require.NoError(t, json.Unmarshal(spacesRec.Body.Bytes(), &spacesResp))
+	foundSpace := false
+	for _, sp := range spacesResp.Spaces {
+		if sp.ProjectID == project.ID {
+			foundSpace = true
+			assert.Equal(t, 0, sp.UnreadCount)
+		}
+	}
+	require.True(t, foundSpace)
+	unreadAfter := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, chatUnreadCountResponse{}, getUnreadCount(t, unreadAfter))
+}
+
+func TestDirectOutbound_DMReply_AdvancesDMWatermark(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	ctx := context.Background()
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+	require.Nil(t, srv.GetMessageBrokerProxy())
+	enableReadSwitch(t, srv)
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", user.ID)
+	require.NoError(t, err)
+	dmConv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{Kind: "direct", Surface: "native", ExternalRef: dmKey, DriftState: "active"})
+	require.NoError(t, err)
+	rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "direct dm reply", "conv:"+dmConv.ID)
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var sendResp struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sendResp))
+	require.NotEmpty(t, sendResp.MessageID)
+	dms, err := wcs.ListDMs(ctx, user.ID)
+	require.NoError(t, err)
+	require.Len(t, dms, 1)
+	assert.Equal(t, dmKey, dms[0].ConversationKey)
+	assert.Equal(t, sendResp.MessageID, dms[0].LastMessageID)
 }

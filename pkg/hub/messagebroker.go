@@ -831,55 +831,54 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 // message, with its stored id, before its SSE event is published: the DM or
 // topic watermark, then the cross-channel DM watermark. deliverToUser runs
 // it, and so does a sending handler that stores the message itself
-// (ptone/scion#4596, decision D2), so a client that refetches the rail on
-// the event already sees the new last_message_id.
+// (storeOutboundRow), so a client that refetches the rail on the event
+// already sees the new last_message_id.
 func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, storeMsg *store.Message) {
-	// Stamp the DM watermark with the store-assigned message ID. The web
-	// channel spoke already registered the participant rows and bumped
-	// last_activity_at, but it runs before the ID exists — without this the
-	// unread indicator (last_message_id != last_read_message_id) never fires
-	// for agent replies.
-	if p.webChatStore != nil && storeMsg.ThreadID != "" {
+	stampUserMessageWatermarks(ctx, p.webChatStore, p.log, storeMsg)
+}
+
+// stampUserMessageWatermarks updates webchat_dm / webchat_topic last_message_id
+// and last_activity_at for a newly persisted user-visible message, plus the
+// cross-channel DM watermark when applicable. Shared between deliverToUser on
+// the broker path and storeOutboundRow on direct / stored-first / unpersisted
+// outbound paths so Hubs without message_broker enabled still advance
+// conversation watermarks on agent replies.
+func stampUserMessageWatermarks(ctx context.Context, wcs WebChatStore, log *slog.Logger, storeMsg *store.Message) {
+	if wcs == nil || storeMsg == nil {
+		return
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+
+	// Mention fan-out copies are hidden in chat-thread and excluded from
+	// nativeDMLastMessages, so they must never become last_message_id.
+	if storeMsg.ThreadID != "" && storeMsg.Type != messages.TypeMention {
 		switch {
 		case strings.HasPrefix(storeMsg.ThreadID, "dm:"):
-			registerDMParticipants(ctx, p.webChatStore, storeMsg.ThreadID)
-			if err := p.webChatStore.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-				p.log.Error("Failed to stamp DM watermark",
-					"thread_id", storeMsg.ThreadID, "error", err)
+			registerDMParticipants(ctx, wcs, storeMsg.ThreadID)
+			if err := wcs.TouchDMActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				log.Error("Failed to stamp DM watermark", "thread_id", storeMsg.ThreadID, "error", err)
 			}
 		case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
-			// Space topic. Same reasoning as DMs: the topic's unread dot is
-			// driven by last_message_id, and the spoke stamped only the
-			// activity timestamp.
-			if err := p.webChatStore.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-				p.log.Error("Failed to stamp topic watermark",
-					"thread_id", storeMsg.ThreadID, "error", err)
+			if err := wcs.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+				log.Error("Failed to stamp topic watermark", "thread_id", storeMsg.ThreadID, "error", err)
 			}
 		}
 	}
 
-	// Cross-channel DM fix: when a message arrives from a non-web channel
-	// (e.g. Discord), its ThreadID is not a DM key, so TouchDMActivity above
-	// is never called. Build the canonical DM key from the sender and
-	// recipient and touch it explicitly so the web chat's unread indicator
-	// tracks per-conversation, not per-channel.
-	//
-	// Guard: skip @mention fan-out copies. When a user is @mentioned in a
-	// space thread, the routed copy also has SenderID + RecipientID set, but
-	// it is NOT a DM — touching DM activity for it would create phantom
-	// unread indicators for conversations that don't exist.
-	if p.webChatStore != nil && storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
-		!strings.HasPrefix(storeMsg.ThreadID, "dm:") &&
-		storeMsg.Type != messages.TypeMention {
+	// Cross-channel DMs have no dm: ThreadID; derive their canonical key.
+	// Mention fan-out copies are not DMs and must not create phantom unread rows.
+	if storeMsg.SenderID != "" && storeMsg.RecipientID != "" &&
+		!strings.HasPrefix(storeMsg.ThreadID, "dm:") && storeMsg.Type != messages.TypeMention {
 		senderKind, sOK := messages.PrincipalKindFromAddress(storeMsg.Sender)
 		recipientKind, rOK := messages.PrincipalKindFromAddress(storeMsg.Recipient)
 		if sOK && rOK {
 			dmKey, err := messages.DMConversationKey(senderKind, storeMsg.SenderID, recipientKind, storeMsg.RecipientID)
 			if err == nil {
-				registerDMParticipants(ctx, p.webChatStore, dmKey)
-				if touchErr := p.webChatStore.TouchDMActivity(ctx, dmKey, storeMsg.ID); touchErr != nil {
-					p.log.Error("Failed to stamp cross-channel DM watermark",
-						"dm_key", dmKey, "thread_id", storeMsg.ThreadID, "error", touchErr)
+				registerDMParticipants(ctx, wcs, dmKey)
+				if touchErr := wcs.TouchDMActivity(ctx, dmKey, storeMsg.ID); touchErr != nil {
+					log.Error("Failed to stamp cross-channel DM watermark", "dm_key", dmKey, "thread_id", storeMsg.ThreadID, "error", touchErr)
 				}
 			}
 		}
