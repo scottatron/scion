@@ -903,21 +903,49 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is
-// non-empty, also updates last_message_id. An empty messageID is accepted
-// gracefully — this happens when the spoke receives a StructuredMessage
-// (which has no ID) rather than a store.Message.
+// non-empty, advances last_message_id monotonically by persisted (created, id)
+// order when both the current and incoming messages exist in messages. An
+// empty messageID updates only last_activity_at.
 func (s *pgWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messageID string) error {
-	if messageID != "" {
-		const q = `UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW() WHERE id = $2`
-		_, err := s.db.ExecContext(ctx, q, messageID, topicID)
-		if err != nil {
+	if messageID == "" {
+		const q = `UPDATE webchat_topic SET last_activity_at = NOW() WHERE id = $1`
+		if _, err := s.db.ExecContext(ctx, q, topicID); err != nil {
 			return fmt.Errorf("webchat store: touch topic activity: %w", err)
 		}
 		return nil
 	}
-	const q = `UPDATE webchat_topic SET last_activity_at = NOW() WHERE id = $1`
-	_, err := s.db.ExecContext(ctx, q, topicID)
+
+	exists, err := s.tableExists(ctx, "messages")
 	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+	if !exists {
+		const q = `UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW() WHERE id = $2`
+		if _, err := s.db.ExecContext(ctx, q, messageID, topicID); err != nil {
+			return fmt.Errorf("webchat store: touch topic activity: %w", err)
+		}
+		return nil
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+
+	q := `UPDATE webchat_topic t
+	         SET last_message_id = $1,
+	             last_activity_at = NOW()
+	       WHERE t.id = $2
+	         AND COALESCE(t.last_message_id, '') <> $1
+	         AND NOT EXISTS (
+	               SELECT 1
+	                 FROM ` + messagesTable + ` cur
+	                 JOIN ` + messagesTable + ` nxt
+	                   ON nxt.id = CASE WHEN $1 ~* ` + pgUUIDShapeRegex + ` THEN $1::uuid END
+	                WHERE cur.id = CASE WHEN t.last_message_id ~* ` + pgUUIDShapeRegex + ` THEN t.last_message_id::uuid END
+	                  AND (cur.created > nxt.created
+	                       OR (cur.created = nxt.created AND cur.id >= nxt.id))
+	             )`
+	if _, err := s.db.ExecContext(ctx, q, messageID, topicID); err != nil {
 		return fmt.Errorf("webchat store: touch topic activity: %w", err)
 	}
 	return nil
@@ -1622,6 +1650,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	if err := s.reconcileTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation reconcile: %w", err)
 	}
+	if err := s.reconcileTopicLastMessages(); err != nil {
+		return fmt.Errorf("topic last_message reconcile: %w", err)
+	}
 	if err := s.addUserPrefsThreadColumns(); err != nil {
 		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
@@ -1869,6 +1900,106 @@ func (s *pgWebChatStore) reconcileTopicConversations() error {
 		        )
 		    )`); err != nil {
 		return fmt.Errorf("reconcile topic conversations: %w", err)
+	}
+
+	return s.markMigrationCompleted(migrationName)
+}
+
+// reconcileTopicLastMessages is a one-time idempotent startup migration that
+// advances webchat_topic.last_message_id (and last_activity_at when lagging) to
+// each live topic's newest visible web message, healing topics left stale by
+// direct-outbound agent replies before watermark stamping ran on storeOutboundRow.
+func (s *pgWebChatStore) reconcileTopicLastMessages() error {
+	const migrationName = "topic_last_message_reconcile"
+	done, err := s.migrationCompleted(migrationName)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	ctx := context.Background()
+	exists, err := s.tableExists(ctx, "messages")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return err
+	}
+	// Minimal test schemas may create a bare messages table without type or
+	// conversation_id; defer reconciliation cleanly until the full schema exists.
+	if _, colErr := s.db.ExecContext(ctx,
+		`SELECT type, conversation_id, channel, thread_id, created FROM `+messagesTable+` LIMIT 0`); colErr != nil {
+		return nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT t.id, COALESCE(t.last_message_id, ''), m.id::text, m.created
+		   FROM webchat_topic t
+		   JOIN LATERAL (
+		          SELECT m2.id, m2.created FROM `+messagesTable+` m2
+		           WHERE m2.channel = 'web' AND m2.type <> 'mention'
+		             AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> ''
+		                   AND m2.conversation_id = CASE WHEN t.conversation_id ~* `+pgUUIDShapeRegex+` THEN t.conversation_id::uuid END)
+		                  OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND m2.thread_id = t.id))
+		           ORDER BY m2.created DESC, m2.id DESC LIMIT 1
+		        ) m ON true
+		   LEFT JOIN `+messagesTable+` cur
+		     ON cur.id = CASE WHEN t.last_message_id ~* `+pgUUIDShapeRegex+` THEN t.last_message_id::uuid END
+		    AND cur.channel = 'web' AND cur.type <> 'mention'
+		    AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> ''
+		          AND cur.conversation_id = CASE WHEN t.conversation_id ~* `+pgUUIDShapeRegex+` THEN t.conversation_id::uuid END)
+		         OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND cur.thread_id = t.id))
+		  WHERE t.deleted_at IS NULL AND COALESCE(t.last_message_id, '') <> m.id::text
+		    AND (cur.id IS NULL OR m.created > cur.created OR (m.created = cur.created AND m.id > cur.id))`)
+	if err != nil {
+		return fmt.Errorf("select topics for last_message reconcile: %w", err)
+	}
+
+	type topicUpdate struct {
+		topicID, curLastID, latestMsgID string
+		latestCreated                   time.Time
+	}
+	var updates []topicUpdate
+	for rows.Next() {
+		var u topicUpdate
+		if err := rows.Scan(&u.topicID, &u.curLastID, &u.latestMsgID, &u.latestCreated); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan topic for last_message reconcile: %w", err)
+		}
+		u.latestCreated = u.latestCreated.UTC()
+		updates = append(updates, u)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+
+	if len(updates) > 0 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin topic last_message reconcile tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		for _, u := range updates {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE webchat_topic
+				    SET last_message_id = $1,
+				        last_activity_at = GREATEST(COALESCE(last_activity_at, $2), $2)
+				  WHERE id = $3 AND COALESCE(last_message_id, '') = $4`,
+				u.latestMsgID, u.latestCreated, u.topicID, u.curLastID); err != nil {
+				return fmt.Errorf("reconcile topic %s last_message_id: %w", u.topicID, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit topic last_message reconcile tx: %w", err)
+		}
 	}
 
 	return s.markMigrationCompleted(migrationName)

@@ -1584,9 +1584,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// channel spokes. Every store and publish call uses storeCtx, so the
 	// caller decides whether request cancellation can cut it short.
 	var boundAttachments []AttachmentRef
-	// stampWatermarks, set on the broker path for a message the handler
-	// stores itself (decision D2), runs the watermark steps of
-	// deliverToUser before the SSE publish.
+	// stampWatermarks defaults to s.webChatStore for direct outbound sends;
+	// on the broker path it delegates to bp.afterUserMessagePersisted so
+	// callers/tests that override bp.webChatStore observe the write.
 	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
 		if decisionSend != nil {
@@ -1618,6 +1618,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
 		if stampWatermarks != nil {
 			stampWatermarks(storeCtx, storeMsg)
+		} else {
+			stampUserMessageWatermarks(storeCtx, wcs, s.messageLog, storeMsg)
 		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
 		var chatOpts []ChatEventOption
@@ -1675,6 +1677,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			stampWatermarks = bp.afterUserMessagePersisted
 			if len(artifactAttachments) > 0 || decisionSend != nil || secretRequestSend != nil {
 				// A decision prompt is stored with its decisions by this
 				// handler, so it takes the same stored-first path.
@@ -1682,7 +1685,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 				// attachments stored as artifacts is stored by this handler,
 				// so they can be bound to the stored row; deliverToUser then
 				// runs only its post-persist steps (StoredMessageID).
-				stampWatermarks = bp.afterUserMessagePersisted
 				stored, logged := s.storeOutboundBeforeBroker(ctx, w, bp, agent, storeMsg, structuredMsg, storeOutboundRow)
 				if !stored {
 					return
