@@ -903,21 +903,49 @@ func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error 
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is
-// non-empty, also updates last_message_id. An empty messageID is accepted
-// gracefully — this happens when the spoke receives a StructuredMessage
-// (which has no ID) rather than a store.Message.
+// non-empty, advances last_message_id monotonically by persisted (created, id)
+// order when both the current and incoming messages exist in messages. An
+// empty messageID updates only last_activity_at.
 func (s *pgWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messageID string) error {
-	if messageID != "" {
-		const q = `UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW() WHERE id = $2`
-		_, err := s.db.ExecContext(ctx, q, messageID, topicID)
-		if err != nil {
+	if messageID == "" {
+		const q = `UPDATE webchat_topic SET last_activity_at = NOW() WHERE id = $1`
+		if _, err := s.db.ExecContext(ctx, q, topicID); err != nil {
 			return fmt.Errorf("webchat store: touch topic activity: %w", err)
 		}
 		return nil
 	}
-	const q = `UPDATE webchat_topic SET last_activity_at = NOW() WHERE id = $1`
-	_, err := s.db.ExecContext(ctx, q, topicID)
+
+	exists, err := s.tableExists(ctx, "messages")
 	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+	if !exists {
+		const q = `UPDATE webchat_topic SET last_message_id = $1, last_activity_at = NOW() WHERE id = $2`
+		if _, err := s.db.ExecContext(ctx, q, messageID, topicID); err != nil {
+			return fmt.Errorf("webchat store: touch topic activity: %w", err)
+		}
+		return nil
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+
+	q := `UPDATE webchat_topic t
+	         SET last_message_id = $1,
+	             last_activity_at = NOW()
+	       WHERE t.id = $2
+	         AND COALESCE(t.last_message_id, '') <> $1
+	         AND NOT EXISTS (
+	               SELECT 1
+	                 FROM ` + messagesTable + ` cur
+	                 JOIN ` + messagesTable + ` nxt
+	                   ON nxt.id = CASE WHEN $1 ~* ` + pgUUIDShapeRegex + ` THEN $1::uuid END
+	                WHERE cur.id = CASE WHEN t.last_message_id ~* ` + pgUUIDShapeRegex + ` THEN t.last_message_id::uuid END
+	                  AND (cur.created > nxt.created
+	                       OR (cur.created = nxt.created AND cur.id >= nxt.id))
+	             )`
+	if _, err := s.db.ExecContext(ctx, q, messageID, topicID); err != nil {
 		return fmt.Errorf("webchat store: touch topic activity: %w", err)
 	}
 	return nil

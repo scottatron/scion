@@ -1353,23 +1353,71 @@ func (s *sqliteWebChatStore) DeleteTopic(ctx context.Context, topicID string) er
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is
-// non-empty, also updates last_message_id. An empty messageID is
-// accepted gracefully — this happens when the spoke receives a
-// StructuredMessage (which has no ID) rather than a store.Message.
+// non-empty, advances last_message_id monotonically by persisted (created, id)
+// order when both the current and incoming messages exist in messages. An
+// empty messageID updates only last_activity_at.
 func (s *sqliteWebChatStore) TouchTopicActivity(ctx context.Context, topicID, messageID string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if messageID != "" {
-		const q = `UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`
-		_, err := s.db.ExecContext(ctx, q, messageID, now, topicID)
-		if err != nil {
+	if messageID == "" {
+		const q = `UPDATE webchat_topic SET last_activity_at = ? WHERE id = ?`
+		if _, err := s.db.ExecContext(ctx, q, now, topicID); err != nil {
 			return fmt.Errorf("webchat store: touch topic activity: %w", err)
 		}
 		return nil
 	}
-	const q = `UPDATE webchat_topic SET last_activity_at = ? WHERE id = ?`
-	_, err := s.db.ExecContext(ctx, q, now, topicID)
+
+	// INVARIANT U-TX-1: check schema metadata before opening a transaction so
+	// MaxOpenConns=1 never deadlocks on a second connection.
+	exists, err := s.tableExists(ctx, "messages")
 	if err != nil {
 		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+	if !exists || !s.hasTableColumn("messages", "created") {
+		const q = `UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`
+		if _, err := s.db.ExecContext(ctx, q, messageID, now, topicID); err != nil {
+			return fmt.Errorf("webchat store: touch topic activity: %w", err)
+		}
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var curID string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(last_message_id, '') FROM webchat_topic WHERE id = ?`, topicID).Scan(&curID)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("webchat store: touch topic activity read current: %w", err)
+	}
+	if curID == messageID {
+		return nil
+	}
+	if curID != "" {
+		var curRaw, nxtRaw any
+		curErr := tx.QueryRowContext(ctx, `SELECT created FROM messages WHERE id = ?`, curID).Scan(&curRaw)
+		nxtErr := tx.QueryRowContext(ctx, `SELECT created FROM messages WHERE id = ?`, messageID).Scan(&nxtRaw)
+		if curErr == nil && nxtErr == nil {
+			curAt := parseSQLiteNullableTime(curRaw)
+			nxtAt := parseSQLiteNullableTime(nxtRaw)
+			if curAt != nil && nxtAt != nil &&
+				(curAt.After(*nxtAt) || (curAt.Equal(*nxtAt) && curID >= messageID)) {
+				return nil
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`,
+		messageID, now, topicID); err != nil {
+		return fmt.Errorf("webchat store: touch topic activity: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: touch topic activity commit: %w", err)
 	}
 	return nil
 }
@@ -2406,52 +2454,105 @@ func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
 	if !exists || !s.hasTableColumn("messages", "type") || !s.hasTableColumn("messages", "conversation_id") || !s.hasTableColumn("messages", "channel") || !s.hasTableColumn("messages", "thread_id") || !s.hasTableColumn("messages", "created") {
 		return nil
 	}
-	type update struct {
-		topicID, lastID, latestID string
-		activity                  string
-		latestCreatedRaw          any
+
+	type topicRow struct {
+		id, convID, lastID, activity string
 	}
-	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.last_message_id, ''), COALESCE(t.last_activity_at, ''), m.id, m.created
-	   FROM webchat_topic t
-	   JOIN messages m ON m.id = (
-	          SELECT m2.id FROM messages m2
-	           WHERE m2.channel = 'web' AND m2.type <> 'mention'
-	             AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND m2.conversation_id = t.conversation_id)
-	                  OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND m2.thread_id = t.id))
-	           ORDER BY m2.created DESC, m2.id DESC LIMIT 1)
-	   LEFT JOIN messages cur ON cur.id = t.last_message_id
-	    AND cur.channel = 'web' AND cur.type <> 'mention'
-	    AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND cur.conversation_id = t.conversation_id)
-	         OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND cur.thread_id = t.id))
-	  WHERE t.deleted_at IS NULL AND COALESCE(t.last_message_id, '') <> m.id
-	    AND (cur.id IS NULL OR m.created > cur.created OR (m.created = cur.created AND m.id > cur.id))`)
+	tRows, err := s.db.Query(
+		`SELECT id, COALESCE(conversation_id, ''), COALESCE(last_message_id, ''), COALESCE(last_activity_at, '')
+		   FROM webchat_topic
+		  WHERE deleted_at IS NULL`)
 	if err != nil {
 		return err
 	}
-	var updates []update
-	for rows.Next() {
-		var u update
-		if err := rows.Scan(&u.topicID, &u.lastID, &u.activity, &u.latestID, &u.latestCreatedRaw); err != nil {
-			_ = rows.Close()
+	var topics []topicRow
+	for tRows.Next() {
+		var tr topicRow
+		if err := tRows.Scan(&tr.id, &tr.convID, &tr.lastID, &tr.activity); err != nil {
+			_ = tRows.Close()
 			return err
 		}
-		latestCreated := parseSQLiteNullableTime(u.latestCreatedRaw)
-		curActivity := parseSQLiteTime(u.activity)
-		newActivity := curActivity
-		if latestCreated != nil && latestCreated.After(newActivity) {
-			newActivity = *latestCreated
+		topics = append(topics, tr)
+	}
+	if err := tRows.Err(); err != nil {
+		_ = tRows.Close()
+		return err
+	}
+	_ = tRows.Close()
+
+	type update struct {
+		topicID, lastID, latestID, activity string
+	}
+	var updates []update
+	for _, tr := range topics {
+		var mRows *sql.Rows
+		if tr.convID != "" {
+			mRows, err = s.db.Query(
+				`SELECT id, created FROM messages WHERE channel = 'web' AND type <> 'mention' AND conversation_id = ?`,
+				tr.convID)
+		} else {
+			mRows, err = s.db.Query(
+				`SELECT id, created FROM messages WHERE channel = 'web' AND type <> 'mention' AND thread_id = ?`,
+				tr.id)
+		}
+		if err != nil {
+			return err
+		}
+
+		var bestID string
+		var bestAt time.Time
+		var hasBest bool
+		var curAt time.Time
+		var hasCur bool
+		for mRows.Next() {
+			var mid string
+			var createdRaw any
+			if err := mRows.Scan(&mid, &createdRaw); err != nil {
+				_ = mRows.Close()
+				return err
+			}
+			parsed := parseSQLiteNullableTime(createdRaw)
+			var ts time.Time
+			if parsed != nil {
+				ts = *parsed
+			}
+			if !hasBest || ts.After(bestAt) || (ts.Equal(bestAt) && mid > bestID) {
+				bestID = mid
+				bestAt = ts
+				hasBest = true
+			}
+			if mid == tr.lastID {
+				curAt = ts
+				hasCur = true
+			}
+		}
+		if err := mRows.Err(); err != nil {
+			_ = mRows.Close()
+			return err
+		}
+		_ = mRows.Close()
+
+		if !hasBest || bestID == tr.lastID {
+			continue
+		}
+		if hasCur && (curAt.After(bestAt) || (curAt.Equal(bestAt) && tr.lastID >= bestID)) {
+			continue
+		}
+		newActivity := parseSQLiteTime(tr.activity)
+		if bestAt.After(newActivity) {
+			newActivity = bestAt
 		}
 		if newActivity.IsZero() {
 			newActivity = time.Now().UTC()
 		}
-		u.activity = newActivity.UTC().Format(time.RFC3339Nano)
-		updates = append(updates, u)
+		updates = append(updates, update{
+			topicID:  tr.id,
+			lastID:   tr.lastID,
+			latestID: bestID,
+			activity: newActivity.UTC().Format(time.RFC3339Nano),
+		})
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	_ = rows.Close()
+
 	if len(updates) > 0 {
 		tx, err := s.db.BeginTx(context.Background(), nil)
 		if err != nil {
@@ -2459,7 +2560,9 @@ func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		for _, u := range updates {
-			if _, err := tx.Exec(`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ? AND COALESCE(last_message_id, '') = ?`, u.latestID, u.activity, u.topicID, u.lastID); err != nil {
+			if _, err := tx.Exec(
+				`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ? AND COALESCE(last_message_id, '') = ?`,
+				u.latestID, u.activity, u.topicID, u.lastID); err != nil {
 				return err
 			}
 		}

@@ -781,3 +781,40 @@ func TestStampUserMessageWatermarks_GuardsTopicChannelProjectAndConversation(t *
 	require.NoError(t, err)
 	assert.Equal(t, validID, got.LastMessageID, "valid matching web topic message must advance watermark")
 }
+
+func TestTouchTopicActivity_ReversedCompletionOrderDoesNotRegressWatermark(t *testing.T) {
+	wcs, db := newPromoteTestStoreWithConversations(t)
+	defer db.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	projID, topicID, convID := api.NewUUID(), api.NewUUID(), api.NewUUID()
+	olderMsg, newerMsg := api.NewUUID(), api.NewUUID()
+	base := time.Date(2026, 11, 25, 5, 0, 0, 0, time.UTC)
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicID,
+		ProjectID:      projID,
+		Name:           "monotonic-topic",
+		ConversationID: convID,
+		CreatedBy:      "user-1",
+		CreatedAt:      base,
+		LastActivityAt: base,
+	}))
+	for _, msg := range []struct {
+		id      string
+		created time.Time
+	}{
+		{olderMsg, base.Add(time.Second)},
+		{newerMsg, base.Add(2 * time.Second)},
+	} {
+		_, err := db.Exec(`INSERT INTO messages (id, project_id, sender, recipient, msg, type, channel, thread_id, conversation_id, created)
+			VALUES (?, ?, 'agent:test', 'thread:test', 'body', 'instruction', 'web', ?, ?, ?)`,
+			msg.id, projID, topicID, convID, msg.created.Format(time.RFC3339Nano))
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, wcs.TouchTopicActivity(ctx, topicID, newerMsg))
+	require.NoError(t, wcs.TouchTopicActivity(ctx, topicID, olderMsg))
+	got, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	assert.Equal(t, newerMsg, got.LastMessageID)
+}
