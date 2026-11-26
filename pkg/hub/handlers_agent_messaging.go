@@ -1584,6 +1584,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// channel spokes. Every store and publish call uses storeCtx, so the
 	// caller decides whether request cancellation can cut it short.
 	var boundAttachments []AttachmentRef
+	// stampWatermarks defaults to s.webChatStore for direct outbound sends;
+	// on the broker path it delegates to bp.afterUserMessagePersisted so
+	// callers/tests that override bp.webChatStore observe the write.
+	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
 		if decisionSend != nil {
 			// The message and its decisions in one transaction.
@@ -1612,9 +1616,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		s.mu.RUnlock()
 		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
 		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
-		// Every storeOutboundRow caller persists storeMsg itself rather than
-		// going through deliverToUser, so stamp watermarks before publishing SSE.
-		stampUserMessageWatermarks(storeCtx, wcs, s.messageLog, storeMsg)
+		if stampWatermarks != nil {
+			stampWatermarks(storeCtx, storeMsg)
+		} else {
+			stampUserMessageWatermarks(storeCtx, wcs, s.messageLog, storeMsg)
+		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
 		var chatOpts []ChatEventOption
 		if decisionSend != nil {
@@ -1671,6 +1677,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	case deliveryUserBroker:
 		// Broker path: PublishUserMessage handles persistence and SSE.
 		if bp := s.GetMessageBrokerProxy(); bp != nil {
+			stampWatermarks = bp.afterUserMessagePersisted
 			if len(artifactAttachments) > 0 || decisionSend != nil || secretRequestSend != nil {
 				// A decision prompt is stored with its decisions by this
 				// handler, so it takes the same stored-first path.

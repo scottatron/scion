@@ -544,12 +544,17 @@ func assertTopicLastMessageReconcile(t *testing.T, db *sql.DB, dialect string, n
 	}
 
 	tStale, cStale := uuid.NewString(), uuid.NewString()
-	m1, m2, m3, m4 := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	m1, m2, m3, m4, m5 := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	seedTopic(tStale, cStale, "auth", m1, base.Add(time.Minute), nil)
 	seedMsg(m1, "web", "reply", tStale, cStale, base.Add(time.Minute))
 	seedMsg(m2, "web", "instruction", "", cStale, base.Add(5*time.Minute))
 	seedMsg(m3, "web", "mention", tStale, cStale, base.Add(6*time.Minute))
 	seedMsg(m4, "discord", "chat", tStale, cStale, base.Add(7*time.Minute))
+	seedMsg(m5, "web", "instruction", tStale, "", base.Add(8*time.Minute))
+	tNewerWatermark, mNewer, mOlder := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	seedTopic(tNewerWatermark, "", "newer-watermark", mNewer, base.Add(9*time.Minute), nil)
+	seedMsg(mNewer, "web", "instruction", tNewerWatermark, "", base.Add(9*time.Minute))
+	seedMsg(mOlder, "web", "instruction", tNewerWatermark, "", base.Add(2*time.Minute))
 	tEmpty, mEmpty := uuid.NewString(), uuid.NewString()
 	seedTopic(tEmpty, "", "general", "", base, nil)
 	seedMsg(mEmpty, "web", "instruction", tEmpty, "", base.Add(3*time.Minute))
@@ -588,6 +593,9 @@ func assertTopicLastMessageReconcile(t *testing.T, db *sql.DB, dialect string, n
 		assert.Equal(t, mDelOld, gotDel, "%s: deleted topic untouched", label)
 		gotNone, _ := readLastMsg(tNoMsgs)
 		assert.Empty(t, gotNone, "%s: empty topic stays empty", label)
+		gotNewer, actNewer := readLastMsg(tNewerWatermark)
+		assert.Equal(t, mNewer, gotNewer, "%s: newer existing watermark is not rolled back", label)
+		assert.True(t, nullableTimesEqualMicro(ptrTime(base.Add(9*time.Minute)), &actNewer), "%s: newer watermark activity is preserved", label)
 	}
 	check("after first reconcile")
 	require.NoError(t, newStore().Init())

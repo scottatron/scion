@@ -707,3 +707,77 @@ func TestDirectOutbound_DMReply_AdvancesDMWatermark(t *testing.T) {
 	assert.Equal(t, dmKey, dms[0].ConversationKey)
 	assert.Equal(t, sendResp.MessageID, dms[0].LastMessageID)
 }
+
+func TestStampUserMessageWatermarks_GuardsTopicChannelProjectAndConversation(t *testing.T) {
+	ctx := context.Background()
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+
+	projA, projB := api.NewUUID(), api.NewUUID()
+	topicID, convA, convOther := api.NewUUID(), api.NewUUID(), api.NewUUID()
+	seedMsgID := api.NewUUID()
+	now := time.Now().UTC()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicID,
+		ProjectID:      projA,
+		Name:           "guarded-topic",
+		ConversationID: convA,
+		CreatedBy:      "user-1",
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}))
+	require.NoError(t, wcs.TouchTopicActivity(ctx, topicID, seedMsgID))
+
+	// 1. Cross-project message with matching ThreadID must NOT overwrite topic watermark.
+	stampUserMessageWatermarks(ctx, wcs, slog.Default(), &store.Message{
+		ID:        api.NewUUID(),
+		ProjectID: projB,
+		Channel:   "web",
+		ThreadID:  topicID,
+		Type:      messages.TypeInstruction,
+	})
+	got, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	assert.Equal(t, seedMsgID, got.LastMessageID, "cross-project ThreadID must not overwrite topic watermark")
+
+	// 2. Non-web channel message must NOT overwrite topic watermark.
+	stampUserMessageWatermarks(ctx, wcs, slog.Default(), &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      projA,
+		Channel:        "discord",
+		ThreadID:       topicID,
+		ConversationID: convA,
+		Type:           messages.TypeInstruction,
+	})
+	got, err = wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	assert.Equal(t, seedMsgID, got.LastMessageID, "non-web message must not overwrite topic watermark")
+
+	// 3. Mismatched ConversationID must NOT overwrite topic watermark.
+	stampUserMessageWatermarks(ctx, wcs, slog.Default(), &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      projA,
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: convOther,
+		Type:           messages.TypeInstruction,
+	})
+	got, err = wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	assert.Equal(t, seedMsgID, got.LastMessageID, "mismatched ConversationID must not overwrite topic watermark")
+
+	// 4. Matching ProjectID + Channel="web" + ConversationID DOES advance watermark.
+	validID := api.NewUUID()
+	stampUserMessageWatermarks(ctx, wcs, slog.Default(), &store.Message{
+		ID:             validID,
+		ProjectID:      projA,
+		Channel:        "web",
+		ThreadID:       topicID,
+		ConversationID: convA,
+		Type:           messages.TypeInstruction,
+	})
+	got, err = wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	assert.Equal(t, validID, got.LastMessageID, "valid matching web topic message must advance watermark")
+}

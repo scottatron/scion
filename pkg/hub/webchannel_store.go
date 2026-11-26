@@ -2411,7 +2411,20 @@ func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
 		activity                  string
 		latestCreatedRaw          any
 	}
-	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.last_message_id, ''), COALESCE(t.last_activity_at, ''), m.id, m.created FROM webchat_topic t JOIN messages m ON m.id = (SELECT m2.id FROM messages m2 WHERE m2.channel = 'web' AND m2.type <> 'mention' AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND m2.conversation_id = t.conversation_id) OR m2.thread_id = t.id) ORDER BY m2.created DESC, m2.id DESC LIMIT 1) WHERE t.deleted_at IS NULL`)
+	rows, err := s.db.Query(`SELECT t.id, COALESCE(t.last_message_id, ''), COALESCE(t.last_activity_at, ''), m.id, m.created
+	   FROM webchat_topic t
+	   JOIN messages m ON m.id = (
+	          SELECT m2.id FROM messages m2
+	           WHERE m2.channel = 'web' AND m2.type <> 'mention'
+	             AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND m2.conversation_id = t.conversation_id)
+	                  OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND m2.thread_id = t.id))
+	           ORDER BY m2.created DESC, m2.id DESC LIMIT 1)
+	   LEFT JOIN messages cur ON cur.id = t.last_message_id
+	    AND cur.channel = 'web' AND cur.type <> 'mention'
+	    AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> '' AND cur.conversation_id = t.conversation_id)
+	         OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND cur.thread_id = t.id))
+	  WHERE t.deleted_at IS NULL AND COALESCE(t.last_message_id, '') <> m.id
+	    AND (cur.id IS NULL OR m.created > cur.created OR (m.created = cur.created AND m.id > cur.id))`)
 	if err != nil {
 		return err
 	}
@@ -2424,17 +2437,15 @@ func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
 		}
 		latestCreated := parseSQLiteNullableTime(u.latestCreatedRaw)
 		curActivity := parseSQLiteTime(u.activity)
-		if u.lastID != u.latestID {
-			newActivity := curActivity
-			if latestCreated != nil && latestCreated.After(newActivity) {
-				newActivity = *latestCreated
-			}
-			if newActivity.IsZero() {
-				newActivity = time.Now().UTC()
-			}
-			u.activity = newActivity.UTC().Format(time.RFC3339Nano)
-			updates = append(updates, u)
+		newActivity := curActivity
+		if latestCreated != nil && latestCreated.After(newActivity) {
+			newActivity = *latestCreated
 		}
+		if newActivity.IsZero() {
+			newActivity = time.Now().UTC()
+		}
+		u.activity = newActivity.UTC().Format(time.RFC3339Nano)
+		updates = append(updates, u)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -2448,7 +2459,7 @@ func (s *sqliteWebChatStore) reconcileTopicLastMessages() error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		for _, u := range updates {
-			if _, err := tx.Exec(`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ?`, u.latestID, u.activity, u.topicID); err != nil {
+			if _, err := tx.Exec(`UPDATE webchat_topic SET last_message_id = ?, last_activity_at = ? WHERE id = ? AND COALESCE(last_message_id, '') = ?`, u.latestID, u.activity, u.topicID, u.lastID); err != nil {
 				return err
 			}
 		}

@@ -1899,71 +1899,53 @@ func (s *pgWebChatStore) reconcileTopicLastMessages() error {
 	if !exists {
 		return nil
 	}
-	schema, err := s.currentSchema(ctx)
-	if err != nil {
-		return err
-	}
-	var colCount int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM information_schema.columns
-		  WHERE table_schema = $1
-		    AND table_name = 'messages'
-		    AND column_name IN ('type', 'conversation_id', 'channel', 'thread_id', 'created')`,
-		schema).Scan(&colCount); err != nil {
-		return fmt.Errorf("check messages columns for topic last_message reconcile: %w", err)
-	}
-	if colCount < 5 {
-		return nil
-	}
-
 	messagesTable, err := s.table(ctx, "messages")
 	if err != nil {
 		return err
 	}
+	// Minimal test schemas may create a bare messages table without type or
+	// conversation_id; defer reconciliation cleanly until the full schema exists.
+	if _, colErr := s.db.ExecContext(ctx,
+		`SELECT type, conversation_id, channel, thread_id, created FROM `+messagesTable+` LIMIT 0`); colErr != nil {
+		return nil
+	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT t.id, COALESCE(t.last_message_id, ''), t.last_activity_at,
-		        m.id::text, m.created
+		`SELECT t.id, COALESCE(t.last_message_id, ''), m.id::text, m.created
 		   FROM webchat_topic t
 		   JOIN LATERAL (
-		          SELECT m2.id, m2.created
-		            FROM `+messagesTable+` m2
-		           WHERE m2.channel = 'web'
-		             AND m2.type <> 'mention'
-		             AND ((t.conversation_id IS NOT NULL
-		                   AND m2.conversation_id = CASE
-		                         WHEN t.conversation_id ~* `+pgUUIDShapeRegex+`
-		                         THEN t.conversation_id::uuid END)
-		                  OR m2.thread_id = t.id)
-		           ORDER BY m2.created DESC, m2.id DESC
-		           LIMIT 1
+		          SELECT m2.id, m2.created FROM `+messagesTable+` m2
+		           WHERE m2.channel = 'web' AND m2.type <> 'mention'
+		             AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> ''
+		                   AND m2.conversation_id = CASE WHEN t.conversation_id ~* `+pgUUIDShapeRegex+` THEN t.conversation_id::uuid END)
+		                  OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND m2.thread_id = t.id))
+		           ORDER BY m2.created DESC, m2.id DESC LIMIT 1
 		        ) m ON true
-		  WHERE t.deleted_at IS NULL`)
+		   LEFT JOIN `+messagesTable+` cur
+		     ON cur.id = CASE WHEN t.last_message_id ~* `+pgUUIDShapeRegex+` THEN t.last_message_id::uuid END
+		    AND cur.channel = 'web' AND cur.type <> 'mention'
+		    AND ((t.conversation_id IS NOT NULL AND t.conversation_id <> ''
+		          AND cur.conversation_id = CASE WHEN t.conversation_id ~* `+pgUUIDShapeRegex+` THEN t.conversation_id::uuid END)
+		         OR ((t.conversation_id IS NULL OR t.conversation_id = '') AND cur.thread_id = t.id))
+		  WHERE t.deleted_at IS NULL AND COALESCE(t.last_message_id, '') <> m.id::text
+		    AND (cur.id IS NULL OR m.created > cur.created OR (m.created = cur.created AND m.id > cur.id))`)
 	if err != nil {
 		return fmt.Errorf("select topics for last_message reconcile: %w", err)
 	}
 
 	type topicUpdate struct {
-		topicID     string
-		latestMsgID string
-		newActivity time.Time
+		topicID, curLastID, latestMsgID string
+		latestCreated                   time.Time
 	}
 	var updates []topicUpdate
 	for rows.Next() {
-		var topicID, curLastID, latestID string
-		var curActivity *time.Time
-		var latestCreated time.Time
-		if err := rows.Scan(&topicID, &curLastID, &curActivity, &latestID, &latestCreated); err != nil {
+		var u topicUpdate
+		if err := rows.Scan(&u.topicID, &u.curLastID, &u.latestMsgID, &u.latestCreated); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan topic for last_message reconcile: %w", err)
 		}
-		if curLastID != latestID {
-			newAct := latestCreated.UTC()
-			if curActivity != nil && curActivity.After(newAct) {
-				newAct = curActivity.UTC()
-			}
-			updates = append(updates, topicUpdate{topicID: topicID, latestMsgID: latestID, newActivity: newAct})
-		}
+		u.latestCreated = u.latestCreated.UTC()
+		updates = append(updates, u)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -1979,8 +1961,11 @@ func (s *pgWebChatStore) reconcileTopicLastMessages() error {
 		defer tx.Rollback() //nolint:errcheck
 		for _, u := range updates {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE webchat_topic SET last_message_id = $1, last_activity_at = $2 WHERE id = $3`,
-				u.latestMsgID, u.newActivity, u.topicID); err != nil {
+				`UPDATE webchat_topic
+				    SET last_message_id = $1,
+				        last_activity_at = GREATEST(COALESCE(last_activity_at, $2), $2)
+				  WHERE id = $3 AND COALESCE(last_message_id, '') = $4`,
+				u.latestMsgID, u.latestCreated, u.topicID, u.curLastID); err != nil {
 				return fmt.Errorf("reconcile topic %s last_message_id: %w", u.topicID, err)
 			}
 		}

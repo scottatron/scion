@@ -861,8 +861,21 @@ func stampUserMessageWatermarks(ctx context.Context, wcs WebChatStore, log *slog
 				log.Error("Failed to stamp DM watermark", "thread_id", storeMsg.ThreadID, "error", err)
 			}
 		case !strings.HasPrefix(storeMsg.ThreadID, "agent:"):
-			if err := wcs.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
-				log.Error("Failed to stamp topic watermark", "thread_id", storeMsg.ThreadID, "error", err)
+			// Native space topics list only channel="web" messages and belong to
+			// one project (and linked conversation when set). Verify all three
+			// before stamping so an external-channel or cross-project ThreadID
+			// cannot overwrite a foreign topic's watermark.
+			if storeMsg.Channel == "web" {
+				topic, err := wcs.GetTopic(ctx, storeMsg.ThreadID)
+				if err != nil {
+					log.Error("Failed to look up topic for watermark", "thread_id", storeMsg.ThreadID, "error", err)
+				} else if topic != nil &&
+					topic.ProjectID != "" && topic.ProjectID == storeMsg.ProjectID &&
+					(topic.ConversationID == "" || storeMsg.ConversationID == "" || topic.ConversationID == storeMsg.ConversationID) {
+					if err := wcs.TouchTopicActivity(ctx, storeMsg.ThreadID, storeMsg.ID); err != nil {
+						log.Error("Failed to stamp topic watermark", "thread_id", storeMsg.ThreadID, "error", err)
+					}
+				}
 			}
 		}
 	}
